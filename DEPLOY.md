@@ -202,6 +202,21 @@ cast send PROXY_ADDRESS \
   --private-key $PRIVATE_KEY
 ```
 
+## proxy指向升级合约
+
+```bash
+cast send proxy地址 \
+  "upgradeTo(address)" 升级合约地址 \
+  --rpc-url $RPC_URL \
+  --private-key $PRIVATE_KEY
+
+验证升级合约
+forge verify-contract 升级合约地址 \
+  src/文件名称.sol:合约名称 \
+  --chain-id chain_id \
+  --etherscan-api-key apikey
+
+```
 ## 注意事项
 
 1. **私钥安全**：永远不要将私钥提交到 Git 仓库
