@@ -104,7 +104,8 @@ forge script script/DeployTransferWallet.s.sol \
 # 1. 部署实现合约
 forge create src/transferWallet.sol:TransferWallet \
   --rpc-url $RPC_URL \
-  --private-key $PRIVATE_KEY
+  --private-key $PRIVATE_KEY \
+  --broadcast
 
 # 2. 编码初始化数据
 cast calldata "initialize(address)" YOUR_OWNER_ADDRESS
@@ -113,7 +114,8 @@ cast calldata "initialize(address)" YOUR_OWNER_ADDRESS
 forge create lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy \
   --constructor-args IMPLEMENTATION_ADDRESS INIT_DATA \
   --rpc-url $RPC_URL \
-  --private-key $PRIVATE_KEY
+  --private-key $PRIVATE_KEY \
+  --broadcast
 ```
 
 ## 部署后的验证
@@ -191,7 +193,8 @@ forge script script/DeployTransferWallet.s.sol \
 # 1. 部署新的实现合约
 forge create src/transferWallet.sol:TransferWallet \
   --rpc-url $RPC_URL \
-  --private-key $PRIVATE_KEY
+  --private-key $PRIVATE_KEY \
+  --broadcast
 
 # 2. 调用升级函数（通过代理）
 cast send PROXY_ADDRESS \

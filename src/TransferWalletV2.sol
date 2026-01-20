@@ -19,17 +19,24 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
 
     // #主币额度
     mapping (address => uint256) public depositMainTokenQuota;
-    //锁仓映射
-    mapping (address => uint256) public unlockTime;
 
-    address public TokenAddress;
-    bytes32 public test= "test";
+    // 多代币锁仓支持
+    // user => token => unlockTime
+    mapping(address => mapping(address => uint256)) public tokenUnlockTime;
+    // user => token => locked amount
+    mapping(address => mapping(address => uint256)) public tokenLockedAmount;
 
     event Withdraw(address,uint);
     event Deposit(address,uint);
     event Transfer(address[] ,uint256[] );
     event DepositLocked(
         address indexed user,
+        uint256 amount,
+        uint256 unlockTime
+    );
+    event TokenDepositLocked(
+        address indexed user,
+        address indexed token,
         uint256 amount,
         uint256 unlockTime
     );
@@ -65,25 +72,31 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
         emit ProxyInitialized(address(this), _getImplementation(), initialOwner);
     }
 
-    // ReentrancyGuardUpgradeable 的 nonReentrant 修饰符已经通过继承获得
-    // 可以直接使用
+    
 
     /**
-     * @dev 存入并锁仓 ERC20 Token
+     * @dev 存入并锁仓指定的 ERC20 Token（新版本，支持任意代币和自定义锁定期）
+     * @param tokenAddress 要锁定的代币合约地址
      * @param amount 要存入的 Token 数量，必须大于 0
+     * @param lockDays 锁定天数，必须大于 0
      * @return 操作是否成功
-     * @notice Token 将被锁仓 30 天，在此期间无法提取
      * @notice 调用前需要先授权合约足够的 Token 额度
+     * @notice 同一用户可以锁定多种不同的代币
+     * @notice 如果已有锁定记录，新的锁定期将从当前时间开始计算
      */
-    function depositlockToken(uint256 amount) external returns (bool) {
+    function depositlockToken(address tokenAddress, uint256 amount, uint256 lockDays) nonReentrant external returns (bool) {
         require(amount > 0, "amount = 0");
-        require(TokenAddress != address(0), "Token address not set");
+        require(tokenAddress != address(0), "Invalid token address");
+        require(lockDays > 0, "Lock days must be greater than 0");
+        
         uint256 nowTime = block.timestamp;
-        unlockTime[msg.sender] = nowTime + 30 days; // 锁仓一个月
+        uint256 lockDuration = lockDays * 1 days;
+        tokenUnlockTime[msg.sender][tokenAddress] = nowTime + lockDuration;
+        tokenLockedAmount[msg.sender][tokenAddress] += amount;
 
-        IERC20 token = IERC20(TokenAddress);
+        IERC20 token = IERC20(tokenAddress);
 
-        // 确保授权充足（可选但强烈推荐）
+        // 确保授权充足
         require(
             token.allowance(msg.sender, address(this)) >= amount,
             "ERC20: insufficient allowance"
@@ -96,79 +109,151 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
         );
         require(success, "transfer failed");
 
-        emit DepositLocked(msg.sender, amount, unlockTime[msg.sender]);
+        emit TokenDepositLocked(msg.sender, tokenAddress, amount, tokenUnlockTime[msg.sender][tokenAddress]);
 
         return true;
     }
 
     /**
-     * @dev 设置 ERC20 Token 合约地址
-     * @param tokenAddress Token 合约地址
-     * @notice 只有合约所有者可以调用此函数
+     * @dev 查询指定用户和代币的锁定信息（新版本，支持任意代币）
+     * @param user 要查询的用户地址
+     * @param tokenAddress 要查询的代币合约地址
+     * @return unlockTimestamp Token 解锁时间戳（Unix 时间），如果为 0 表示未锁定
+     * @return isLocked 是否仍在锁定期内
+     * @return remainingTime 剩余锁定时间（秒），如果已解锁则为 0
+     * @return lockedAmount 锁定的代币数量
      */
-    function setTokenAddress(address tokenAddress) external onlyOwner {
-        TokenAddress = tokenAddress;
+    function getTokenLockInfo(address user, address tokenAddress) external view returns (
+        uint256 unlockTimestamp,
+        bool isLocked,
+        uint256 remainingTime,
+        uint256 lockedAmount
+    ) {
+        unlockTimestamp = tokenUnlockTime[user][tokenAddress];
+        lockedAmount = tokenLockedAmount[user][tokenAddress];
+        
+        if (unlockTimestamp == 0) {
+            // 未设置锁定时间
+            isLocked = false;
+            remainingTime = 0;
+        } else if (block.timestamp >= unlockTimestamp) {
+            // 已解锁
+            isLocked = false;
+            remainingTime = 0;
+        } else {
+            // 仍在锁定期内
+            isLocked = true;
+            remainingTime = unlockTimestamp - block.timestamp;
+        }
+        
+        return (unlockTimestamp, isLocked, remainingTime, lockedAmount);
     }
-    
+
     /**
-     * @dev 获取合约中 ERC20 Token 的余额
-     * @return 合约持有的 Token 数量
+     * @dev 查询合约中指定代币的余额
+     * @param tokenAddress 要查询的代币合约地址
+     * @return 合约持有的指定 Token 数量
      */
-    function TokenBalanceOf() public view returns (uint256) {
-        require(TokenAddress != address(0), "Token address not set");
-        IERC20 token = IERC20(TokenAddress);
+    function getTokenBalance(address tokenAddress) public view returns (uint256) {
+        require(tokenAddress != address(0), "Invalid token address");
+        IERC20 token = IERC20(tokenAddress);
         return token.balanceOf(address(this));
     }
-    
+
     /**
-     * @dev 批量转账 ERC20 Token（仅限 owner 调用）
-     * @param recipients 接收者地址数组
-     * @param amounts 对应的转账数量数组
+     * @dev 提取已解锁的代币（用户自己提取）
+     * @param tokenAddress 要提取的代币合约地址
+     * @param amount 要提取的数量，如果为 0 则提取全部
      * @return 操作是否成功
-     * @notice 只有合约所有者可以调用
-     * @notice 调用者必须已解锁（锁仓时间已过）
-     * @notice recipients 和 amounts 数组长度必须相等
+     * @notice 只有之前锁定过代币的用户才能提取
+     * @notice 只有锁定期已过才能提取
+     * @notice 提取数量不能超过锁定的数量
      */
-    function transferToken(address[] memory recipients,uint256[] memory amounts) external onlyOwner  returns (bool) {
-        uint256 balance = TokenBalanceOf();
-        require(balance != 0,"Token balance is 0");
-        uint256 totalAmount = 0;
-        uint amountlength = amounts.length;
-        for (uint i= 0;i<amountlength;){
-            totalAmount += amounts[i];
-            unchecked{
-                i++;
-            }
+    function withdrawLockedToken(address tokenAddress, uint256 amount) external returns (bool) {
+        require(tokenAddress != address(0), "Invalid token address");
+        
+        // 检查调用者是否锁定过代币
+        uint256 lockedAmount = tokenLockedAmount[msg.sender][tokenAddress];
+        require(lockedAmount > 0, "You have no locked tokens for this token address");
+        
+        // 检查是否已解锁
+        uint256 unlockTimestamp = tokenUnlockTime[msg.sender][tokenAddress];
+        require(unlockTimestamp != 0, "No lock record found");
+        require(block.timestamp >= unlockTimestamp, "Tokens still locked");
+        
+        // 确定提取数量
+        uint256 withdrawAmount = amount;
+        if (amount == 0) {
+            // 提取全部
+            withdrawAmount = lockedAmount;
+        } else {
+            require(amount <= lockedAmount, "Insufficient locked amount");
         }
-        require(totalAmount>0,"amount cant be 0");
-        // ✅ 正确的时间判断
-        require(block.timestamp >= unlockTime[msg.sender], "still locked");
-        unlockTime[msg.sender] = 0;
-        _batchTransferToken(recipients, amounts);
+        
+        // 更新锁定数量
+        tokenLockedAmount[msg.sender][tokenAddress] -= withdrawAmount;
+        
+        // 如果全部提取完毕，清除解锁时间
+        if (tokenLockedAmount[msg.sender][tokenAddress] == 0) {
+            tokenUnlockTime[msg.sender][tokenAddress] = 0;
+        }
+        
+        // 转账代币给用户
+        IERC20 token = IERC20(tokenAddress);
+        bool success = token.transfer(msg.sender, withdrawAmount);
+        require(success, "Token transfer failed");
+        
         return true;
     }
 
     /**
-     * @dev 内部函数：批量转账 ERC20 Token
-     * @param recipients 接收者地址数组
-     * @param amounts 对应的转账数量数组
+     * @dev Owner 帮助用户提取已解锁的代币（紧急情况使用）
+     * @param user 用户地址
+     * @param tokenAddress 要提取的代币合约地址
+     * @param amount 要提取的数量，如果为 0 则提取全部
      * @return 操作是否成功
-     * @notice 此函数会验证数组长度是否匹配，并逐个执行转账
+     * @notice 只有合约所有者可以调用
+     * @notice 只能提取已解锁的代币
+     * @notice 代币会发送给用户本人，不是 owner
      */
-    function _batchTransferToken(address[] memory recipients,uint256[] memory amounts) internal returns (bool){
-        require(recipients.length == amounts.length, "Number of recipients must be equal to the number of amounts.");
-        IERC20 token = IERC20(TokenAddress);
-        uint addresslength  = recipients.length;
-        for(uint i = 0 ;i<addresslength;){
-            bool success = token.transfer(recipients[i], amounts[i]);
-            require(success, "Token transfer failed");
-            unchecked{
-                i++;
-            }
+    function withdrawLockedTokenByOwner(address user, address tokenAddress, uint256 amount) external onlyOwner returns (bool) {
+        require(user != address(0), "Invalid user address");
+        require(tokenAddress != address(0), "Invalid token address");
+        
+        // 检查用户是否锁定过代币
+        uint256 lockedAmount = tokenLockedAmount[user][tokenAddress];
+        require(lockedAmount > 0, "User has no locked tokens for this token address");
+        
+        // 检查是否已解锁
+        uint256 unlockTimestamp = tokenUnlockTime[user][tokenAddress];
+        require(unlockTimestamp != 0, "No lock record found");
+        require(block.timestamp >= unlockTimestamp, "Tokens still locked");
+        
+        // 确定提取数量
+        uint256 withdrawAmount = amount;
+        if (amount == 0) {
+            // 提取全部
+            withdrawAmount = lockedAmount;
+        } else {
+            require(amount <= lockedAmount, "Insufficient locked amount");
         }
-        emit Transfer(recipients,amounts);
+        
+        // 更新锁定数量
+        tokenLockedAmount[user][tokenAddress] -= withdrawAmount;
+        
+        // 如果全部提取完毕，清除解锁时间
+        if (tokenLockedAmount[user][tokenAddress] == 0) {
+            tokenUnlockTime[user][tokenAddress] = 0;
+        }
+        
+        // 转账代币给用户（不是 owner）
+        IERC20 token = IERC20(tokenAddress);
+        bool success = token.transfer(user, withdrawAmount);
+        require(success, "Token transfer failed");
+        
         return true;
     }
+    
 
     /**
      * @dev 获取合约的主币（ETH/BNB）余额

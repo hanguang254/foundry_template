@@ -2,7 +2,8 @@
 pragma solidity ^0.8.20;
 
 import {Script, console} from "forge-std/Script.sol";
-import {TransferWallet} from "../src/transferWallet.sol";
+// import {TransferWallet} from "../src/transferWallet.sol";
+import {TransferWalletV2} from "../src/TransferWalletV2.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
@@ -13,8 +14,8 @@ import {ERC1967Proxy} from "openzeppelin-contracts/contracts/proxy/ERC1967/ERC19
 contract DeployTransferWalletCreate2 is Script {
     // 可以轻松修改的 salt 字符串 - 修改这些字符串会生成不同的地址
     // 示例：使用 "test_shahai" 作为 salt 种子
-    string constant IMPLEMENTATION_SALT_STRING = "0xshahai_meme_wallet_v1";
-    string constant PROXY_SALT_STRING = "0xshahai_meme_wallet_v1";
+    string constant IMPLEMENTATION_SALT_STRING = "0xshahai_meme_wallet_v2";
+    string constant PROXY_SALT_STRING = "0xshahai_meme_wallet_v2";
     
     /**
      * @dev 从字符串生成 salt
@@ -44,13 +45,13 @@ contract DeployTransferWalletCreate2 is Script {
         // 注意：Foundry 的 CREATE2 使用默认的 Create2Deployer
         address predictedImplementation = vm.computeCreate2Address(
             implementationSalt,
-            hashInitCode(type(TransferWallet).creationCode)
+            hashInitCode(type(TransferWalletV2).creationCode)
         );
         console.log("\nPredicted Implementation address:", predictedImplementation);
         
         // 编码初始化数据
         bytes memory initData = abi.encodeWithSelector(
-            TransferWallet.initialize.selector,
+            TransferWalletV2.initialize.selector,
             deployer
         );
         
@@ -70,7 +71,7 @@ contract DeployTransferWalletCreate2 is Script {
         
         // 1. 使用 CREATE2 部署实现合约
         console.log("\n[1/2] Deploying implementation contract with CREATE2...");
-        TransferWallet implementation = new TransferWallet{salt: implementationSalt}();
+        TransferWalletV2 implementation = new TransferWalletV2{salt: implementationSalt}();
         console.log("Implementation deployed at:", address(implementation));
         
         // 验证地址是否符合预期
@@ -96,7 +97,7 @@ contract DeployTransferWalletCreate2 is Script {
         console.log("[OK] Proxy address verified");
         
         // 3. 验证部署
-        TransferWallet proxyContract = TransferWallet(payable(address(proxy)));
+        TransferWalletV2 proxyContract = TransferWalletV2(payable(address(proxy)));
         address owner = proxyContract.owner();
         console.log("\n[Verification] Proxy contract Owner:", owner);
         require(owner == deployer, "Owner setup failed");
