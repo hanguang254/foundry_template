@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {console2} from "forge-std/console2.sol";
-import {TransferWalletV2} from "../src/TransferWalletV2.sol";
+import {TransferWalletV3 as TransferWalletV2} from "../src/TransferWalletV3.sol";
 import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import {ERC1967Proxy} from "openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
@@ -582,5 +582,106 @@ contract TransferWalletV2Test is Test {
         console2.log("Total locked by all users:", totalLocked);
         
         assertEq(totalLocked, 3000 * 1e18);
+    }
+
+    // ==================== 测试锁定期漏洞修复 ====================
+
+    function test_PreventLockTimeShorteningAttack() public {
+        console2.log("\n=== Test: Prevent Lock Time Shortening Attack ===");
+        
+        vm.startPrank(user1);
+        
+        // 1. 首先锁定 1000 USDT，30 天
+        usdt.approve(address(wallet), 1000 * 1e18);
+        wallet.depositlockToken(address(usdt), 1000 * 1e18, 30);
+        
+        uint256 firstUnlockTime = block.timestamp + 30 days;
+        (uint256 unlockTime1, bool isLocked1, uint256 remaining1, uint256 amount1) 
+            = wallet.getTokenLockInfo(user1, address(usdt));
+        
+        console2.log("After first lock (30 days):");
+        console2.log("  Unlock time:", unlockTime1);
+        console2.log("  Locked amount:", amount1);
+        console2.log("  Remaining days:", remaining1 / 1 days);
+        
+        assertEq(unlockTime1, firstUnlockTime, "First unlock time should be 30 days");
+        assertEq(amount1, 1000 * 1e18);
+        
+        // 2. 尝试通过锁定 1 天来缩短锁定期（攻击）
+        usdt.approve(address(wallet), 100 * 1e18);
+        wallet.depositlockToken(address(usdt), 100 * 1e18, 1);  // 🚨 尝试缩短到 1 天
+        
+        (uint256 unlockTime2, bool isLocked2, uint256 remaining2, uint256 amount2) 
+            = wallet.getTokenLockInfo(user1, address(usdt));
+        
+        console2.log("\nAfter second lock (1 day attempt):");
+        console2.log("  Unlock time:", unlockTime2);
+        console2.log("  Locked amount:", amount2);
+        console2.log("  Remaining days:", remaining2 / 1 days);
+        
+        // 验证：解锁时间没有缩短，仍然是 30 天
+        assertEq(unlockTime2, firstUnlockTime, "Unlock time should NOT be shortened");
+        assertEq(amount2, 1100 * 1e18, "Amount should accumulate");
+        assertEq(remaining2, 30 days, "Remaining time should still be 30 days");
+        
+        // 3. 验证在锁定期内无法提取
+        vm.expectRevert("Tokens still locked");
+        wallet.withdrawLockedToken(address(usdt), 0);
+        
+        // 4. 快进 2 天（如果漏洞存在，这时应该能提取）
+        vm.warp(block.timestamp + 2 days);
+        
+        // 验证仍然无法提取（证明漏洞已修复）
+        vm.expectRevert("Tokens still locked");
+        wallet.withdrawLockedToken(address(usdt), 0);
+        
+        // 5. 快进到 30 天后
+        vm.warp(block.timestamp + 28 days);  // 总共 30 天
+        
+        // 现在应该可以提取了
+        uint256 balanceBefore = usdt.balanceOf(user1);
+        wallet.withdrawLockedToken(address(usdt), 0);
+        uint256 balanceAfter = usdt.balanceOf(user1);
+        
+        console2.log("\nAfter 30 days:");
+        console2.log("  Withdrawn:", balanceAfter - balanceBefore);
+        
+        assertEq(balanceAfter - balanceBefore, 1100 * 1e18, "Should withdraw all accumulated amount");
+        
+        vm.stopPrank();
+    }
+
+    function test_AllowLockTimeExtension() public {
+        console2.log("\n=== Test: Allow Lock Time Extension ===");
+        
+        vm.startPrank(user1);
+        
+        // 1. 首先锁定 1000 USDT，10 天
+        usdt.approve(address(wallet), 1000 * 1e18);
+        wallet.depositlockToken(address(usdt), 1000 * 1e18, 10);
+        
+        uint256 firstUnlockTime = block.timestamp + 10 days;
+        (uint256 unlockTime1, , , ) = wallet.getTokenLockInfo(user1, address(usdt));
+        assertEq(unlockTime1, firstUnlockTime);
+        
+        console2.log("After first lock (10 days):");
+        console2.log("  Unlock time:", unlockTime1);
+        
+        // 2. 追加锁定 500 USDT，30 天（延长锁定期）
+        usdt.approve(address(wallet), 500 * 1e18);
+        wallet.depositlockToken(address(usdt), 500 * 1e18, 30);
+        
+        uint256 secondUnlockTime = block.timestamp + 30 days;
+        (uint256 unlockTime2, , , uint256 amount2) = wallet.getTokenLockInfo(user1, address(usdt));
+        
+        console2.log("\nAfter second lock (30 days):");
+        console2.log("  Unlock time:", unlockTime2);
+        console2.log("  Locked amount:", amount2);
+        
+        // 验证：解锁时间应该延长到 30 天
+        assertEq(unlockTime2, secondUnlockTime, "Unlock time should be extended to 30 days");
+        assertEq(amount2, 1500 * 1e18, "Amount should accumulate");
+        
+        vm.stopPrank();
     }
 }

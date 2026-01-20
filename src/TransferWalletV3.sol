@@ -91,7 +91,16 @@ contract TransferWalletV3 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
         
         uint256 nowTime = block.timestamp;
         uint256 lockDuration = lockDays * 1 days;
-        tokenUnlockTime[msg.sender][tokenAddress] = nowTime + lockDuration;
+        uint256 newUnlockTime = nowTime + lockDuration;
+        
+        // 如果已有锁定记录，新的解锁时间必须 >= 当前解锁时间
+        uint256 currentUnlockTime = tokenUnlockTime[msg.sender][tokenAddress];
+        if (currentUnlockTime > 0 && newUnlockTime < currentUnlockTime) {
+            // 使用当前解锁时间（不允许缩短锁定期）
+            newUnlockTime = currentUnlockTime;
+        }
+        
+        tokenUnlockTime[msg.sender][tokenAddress] = newUnlockTime;
         tokenLockedAmount[msg.sender][tokenAddress] += amount;
 
         IERC20 token = IERC20(tokenAddress);
