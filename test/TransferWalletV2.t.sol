@@ -427,4 +427,160 @@ contract TransferWalletV2Test is Test {
         
         assertEq(balance, 2 ether);
     }
+
+    // ==================== 测试 Owner 提取未锁定代币功能 ====================
+
+    function test_WithdrawUnlockedTokenByOwner_AccidentalTransfer() public {
+        console2.log("\n=== Test: Owner Withdraw Accidentally Transferred Tokens ===");
+        
+        // 用户1正常锁定 1000 USDT
+        vm.startPrank(user1);
+        usdt.approve(address(wallet), 1000 * 1e18);
+        wallet.depositlockToken(address(usdt), 1000 * 1e18, 30);
+        vm.stopPrank();
+        
+        // 用户2意外直接转入 500 USDT（没有通过 depositlockToken）
+        vm.prank(user2);
+        usdt.transfer(address(wallet), 500 * 1e18);
+        
+        // 验证合约总余额
+        uint256 contractBalance = usdt.balanceOf(address(wallet));
+        console2.log("Contract total balance:", contractBalance);
+        assertEq(contractBalance, 1500 * 1e18);
+        
+        // 验证用户锁定记录
+        (, , , uint256 user1Locked) = wallet.getTokenLockInfo(user1, address(usdt));
+        console2.log("User1 locked:", user1Locked);
+        assertEq(user1Locked, 1000 * 1e18);
+        
+        // Owner 提取意外转入的 500 USDT
+        address[] memory lockedUsers = new address[](1);
+        lockedUsers[0] = user1;
+        
+        uint256 ownerBalanceBefore = usdt.balanceOf(owner);
+        
+        vm.prank(owner);
+        wallet.withdrawUnlockedTokenByOwner(address(usdt), 500 * 1e18, lockedUsers);
+        
+        uint256 ownerBalanceAfter = usdt.balanceOf(owner);
+        console2.log("Owner received:", ownerBalanceAfter - ownerBalanceBefore);
+        
+        // 验证 owner 收到了 500 USDT
+        assertEq(ownerBalanceAfter - ownerBalanceBefore, 500 * 1e18);
+        
+        // 验证合约还剩 1000 USDT（用户锁定的）
+        assertEq(usdt.balanceOf(address(wallet)), 1000 * 1e18);
+        
+        // 验证用户锁定记录不变
+        (, , , uint256 user1LockedAfter) = wallet.getTokenLockInfo(user1, address(usdt));
+        assertEq(user1LockedAfter, 1000 * 1e18, "User locked amount should not change");
+    }
+
+    function test_WithdrawUnlockedTokenByOwner_MultipleUsers() public {
+        console2.log("\n=== Test: Owner Withdraw With Multiple Locked Users ===");
+        
+        // 用户1锁定 1000 USDT
+        vm.startPrank(user1);
+        usdt.approve(address(wallet), 1000 * 1e18);
+        wallet.depositlockToken(address(usdt), 1000 * 1e18, 30);
+        vm.stopPrank();
+        
+        // 用户2锁定 2000 USDT
+        vm.startPrank(user2);
+        usdt.approve(address(wallet), 2000 * 1e18);
+        wallet.depositlockToken(address(usdt), 2000 * 1e18, 60);
+        vm.stopPrank();
+        
+        // 直接转入 800 USDT（意外转入）
+        usdt.mint(address(wallet), 800 * 1e18);
+        
+        // 验证合约总余额
+        uint256 contractBalance = usdt.balanceOf(address(wallet));
+        console2.log("Contract total balance:", contractBalance);
+        assertEq(contractBalance, 3800 * 1e18); // 1000 + 2000 + 800
+        
+        // Owner 提取时需要提供所有锁定用户
+        address[] memory lockedUsers = new address[](2);
+        lockedUsers[0] = user1;
+        lockedUsers[1] = user2;
+        
+        // Owner 提取 800 USDT
+        vm.prank(owner);
+        wallet.withdrawUnlockedTokenByOwner(address(usdt), 800 * 1e18, lockedUsers);
+        
+        // 验证提取后余额
+        assertEq(usdt.balanceOf(address(wallet)), 3000 * 1e18); // 1000 + 2000
+        assertEq(usdt.balanceOf(owner), 800 * 1e18);
+        
+        // 验证用户锁定记录不变
+        (, , , uint256 user1Locked) = wallet.getTokenLockInfo(user1, address(usdt));
+        (, , , uint256 user2Locked) = wallet.getTokenLockInfo(user2, address(usdt));
+        assertEq(user1Locked, 1000 * 1e18);
+        assertEq(user2Locked, 2000 * 1e18);
+    }
+
+    function test_WithdrawUnlockedTokenByOwner_RevertWhenExceedAvailable() public {
+        console2.log("\n=== Test: Revert When Trying To Withdraw More Than Available ===");
+        
+        // 用户1锁定 1000 USDT
+        vm.startPrank(user1);
+        usdt.approve(address(wallet), 1000 * 1e18);
+        wallet.depositlockToken(address(usdt), 1000 * 1e18, 30);
+        vm.stopPrank();
+        
+        // 意外转入 500 USDT
+        usdt.mint(address(wallet), 500 * 1e18);
+        
+        address[] memory lockedUsers = new address[](1);
+        lockedUsers[0] = user1;
+        
+        // 尝试提取超过可用余额（应该失败）
+        vm.prank(owner);
+        vm.expectRevert("Amount exceeds available balance");
+        wallet.withdrawUnlockedTokenByOwner(address(usdt), 600 * 1e18, lockedUsers);
+    }
+
+    function test_WithdrawUnlockedTokenByOwner_RevertWhenNoUnlockedTokens() public {
+        console2.log("\n=== Test: Revert When No Unlocked Tokens Available ===");
+        
+        // 用户1锁定 1000 USDT
+        vm.startPrank(user1);
+        usdt.approve(address(wallet), 1000 * 1e18);
+        wallet.depositlockToken(address(usdt), 1000 * 1e18, 30);
+        vm.stopPrank();
+        
+        // 没有意外转入
+        address[] memory lockedUsers = new address[](1);
+        lockedUsers[0] = user1;
+        
+        // 尝试提取（应该失败，因为所有代币都被锁定了）
+        vm.prank(owner);
+        vm.expectRevert("No unlocked tokens available");
+        wallet.withdrawUnlockedTokenByOwner(address(usdt), 100 * 1e18, lockedUsers);
+    }
+
+    function test_GetTotalLockedAmount() public {
+        console2.log("\n=== Test: Get Total Locked Amount ===");
+        
+        // 用户1锁定 1000 USDT
+        vm.startPrank(user1);
+        usdt.approve(address(wallet), 1000 * 1e18);
+        wallet.depositlockToken(address(usdt), 1000 * 1e18, 30);
+        vm.stopPrank();
+        
+        // 用户2锁定 2000 USDT
+        vm.startPrank(user2);
+        usdt.approve(address(wallet), 2000 * 1e18);
+        wallet.depositlockToken(address(usdt), 2000 * 1e18, 60);
+        vm.stopPrank();
+        
+        address[] memory users = new address[](2);
+        users[0] = user1;
+        users[1] = user2;
+        
+        uint256 totalLocked = wallet.getTotalLockedAmount(address(usdt), users);
+        console2.log("Total locked by all users:", totalLocked);
+        
+        assertEq(totalLocked, 3000 * 1e18);
+    }
 }

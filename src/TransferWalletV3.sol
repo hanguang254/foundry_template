@@ -10,7 +10,7 @@ import {console} from "forge-std/console.sol";
 
 
 
-contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+contract TransferWalletV3 is Initializable, UUPSUpgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -148,7 +148,7 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
         
         return (unlockTimestamp, isLocked, remainingTime, lockedAmount);
     }
-
+    
     /**
      * @dev 查询合约中指定代币的余额
      * @param tokenAddress 要查询的代币合约地址
@@ -159,7 +159,7 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
         IERC20 token = IERC20(tokenAddress);
         return token.balanceOf(address(this));
     }
-
+    
     /**
      * @dev 提取已解锁的代币（用户自己提取）
      * @param tokenAddress 要提取的代币合约地址
@@ -169,7 +169,7 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
      * @notice 只有锁定期已过才能提取
      * @notice 提取数量不能超过锁定的数量
      */
-    function withdrawLockedToken(address tokenAddress, uint256 amount) external returns (bool) {
+    function withdrawLockedToken(address tokenAddress, uint256 amount) external nonReentrant returns (bool) {
         require(tokenAddress != address(0), "Invalid token address");
         
         // 检查调用者是否锁定过代币
@@ -216,7 +216,7 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
      * @notice 只能提取已解锁的代币
      * @notice 代币会发送给用户本人，不是 owner
      */
-    function withdrawLockedTokenByOwner(address user, address tokenAddress, uint256 amount) external onlyOwner returns (bool) {
+    function withdrawLockedTokenByOwner(address user, address tokenAddress, uint256 amount) external onlyOwner  returns (bool) {
         require(user != address(0), "Invalid user address");
         require(tokenAddress != address(0), "Invalid token address");
         
@@ -249,6 +249,59 @@ contract TransferWalletV2 is Initializable, UUPSUpgradeable, OwnableUpgradeable,
         // 转账代币给用户（不是 owner）
         IERC20 token = IERC20(tokenAddress);
         bool success = token.transfer(user, withdrawAmount);
+        require(success, "Token transfer failed");
+        
+        return true;
+    }
+
+    /**
+     * @dev 计算指定代币的所有用户总锁定量
+     * @param tokenAddress 要查询的代币合约地址
+     * @param users 用户地址数组（需要提供所有可能锁定该代币的用户）
+     * @return 所有用户的总锁定数量
+     * @notice 需要传入所有锁定该代币的用户地址，否则计算不准确
+     */
+    function getTotalLockedAmount(address tokenAddress, address[] memory users) public view returns (uint256) {
+        uint256 totalLocked = 0;
+        for (uint i = 0; i < users.length; i++) {
+            totalLocked += tokenLockedAmount[users[i]][tokenAddress];
+        }
+        return totalLocked;
+    }
+
+    /**
+     * @dev Owner 提取未锁定的代币（意外转入或剩余的代币）
+     * @param tokenAddress 要提取的代币合约地址
+     * @param amount 要提取的数量
+     * @param lockedUsers 所有锁定该代币的用户地址数组
+     * @return 操作是否成功
+     * @notice 只有合约所有者可以调用
+     * @notice 只能提取"未被用户锁定"的代币余额
+     * @notice 代币会发送给 owner
+     * @notice 必须提供所有锁定该代币的用户地址，以确保不会误提取用户锁定的代币
+     */
+    function withdrawUnlockedTokenByOwner(
+        address tokenAddress, 
+        uint256 amount, 
+        address[] memory lockedUsers
+    ) external onlyOwner  returns (bool) {
+        require(tokenAddress != address(0), "Invalid token address");
+        
+        // 获取合约中该代币的总余额
+        IERC20 token = IERC20(tokenAddress);
+        uint256 contractBalance = token.balanceOf(address(this));
+        require(contractBalance > 0, "No tokens in contract");
+        
+        // 计算所有用户的总锁定量
+        uint256 totalLocked = getTotalLockedAmount(tokenAddress, lockedUsers);
+        
+        // 可提取余额 = 合约总余额 - 用户总锁定量
+        uint256 availableBalance = contractBalance - totalLocked;
+        require(availableBalance > 0, "No unlocked tokens available");
+        require(amount <= availableBalance, "Amount exceeds available balance");
+        
+        // 转账代币给 owner
+        bool success = token.transfer(msg.sender, amount);
         require(success, "Token transfer failed");
         
         return true;
